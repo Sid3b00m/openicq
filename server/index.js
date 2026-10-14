@@ -14,6 +14,9 @@ const { attach } = require('./ws');
 const { Store } = require('./store');
 const { Hub } = require('./protocol');
 const { Limits, DEFAULTS } = require('./limits');
+const { History, DEFAULTS: HISTORY_DEFAULTS } = require('./history');
+const { Rooms } = require('./rooms');
+const { MeshtasticBridge } = require('./meshtastic');
 const update = require('./update');
 
 const ROOT = path.join(__dirname, '..');
@@ -55,9 +58,13 @@ const SECURITY_HEADERS = {
   'x-frame-options': 'DENY',
   'referrer-policy': 'no-referrer',
   'permissions-policy': 'camera=(), microphone=(), geolocation=(), interest-cohort=()',
-  'cross-origin-opener-policy': 'same-origin',
   'cross-origin-resource-policy': 'same-origin',
 };
+
+// Cross-Origin-Opener-Policy is only honoured in a secure context, and a
+// browser logs a console error when it arrives over plain HTTP anywhere but
+// localhost. It is added per request instead, where it means something.
+const COOP = { 'cross-origin-opener-policy': 'same-origin' };
 
 function parseList(value) {
   return String(value || '')
@@ -84,6 +91,20 @@ function parseArgs(argv) {
     updateCheck: process.env.OPENICQ_UPDATE_CHECK !== 'off',
     announceUpdates: process.env.OPENICQ_ANNOUNCE_UPDATES === 'on',
     checkUpdateOnly: false,
+
+    history: process.env.OPENICQ_HISTORY !== 'off',
+    historyDays: Number(process.env.OPENICQ_HISTORY_DAYS) || HISTORY_DEFAULTS.maxAgeDays,
+    historyMax: Number(process.env.OPENICQ_HISTORY_MAX) || HISTORY_DEFAULTS.maxPerConversation,
+    rooms: process.env.OPENICQ_ROOMS !== 'off',
+    allowRoomCreation: process.env.OPENICQ_ROOM_CREATION !== 'off',
+
+    mqttHost: process.env.OPENICQ_MQTT_HOST || '',
+    mqttPort: Number(process.env.OPENICQ_MQTT_PORT) || 0,
+    mqttTls: process.env.OPENICQ_MQTT_TLS === 'on',
+    mqttUser: process.env.OPENICQ_MQTT_USER || '',
+    mqttPassword: process.env.OPENICQ_MQTT_PASSWORD || '',
+    meshRoot: process.env.OPENICQ_MESH_ROOT || 'msh/US',
+    meshChannels: parseList(process.env.OPENICQ_MESH_CHANNELS),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -125,6 +146,42 @@ function parseArgs(argv) {
         break;
       case '--registrations-per-hour':
         opts.registrationsPerHour = Number(next());
+        break;
+      case '--no-history':
+        opts.history = false;
+        break;
+      case '--history-days':
+        opts.historyDays = Number(next());
+        break;
+      case '--history-max':
+        opts.historyMax = Number(next());
+        break;
+      case '--no-rooms':
+        opts.rooms = false;
+        break;
+      case '--no-room-creation':
+        opts.allowRoomCreation = false;
+        break;
+      case '--mqtt-host':
+        opts.mqttHost = next();
+        break;
+      case '--mqtt-port':
+        opts.mqttPort = Number(next());
+        break;
+      case '--mqtt-tls':
+        opts.mqttTls = true;
+        break;
+      case '--mqtt-user':
+        opts.mqttUser = next();
+        break;
+      case '--mqtt-password':
+        opts.mqttPassword = next();
+        break;
+      case '--mesh-root':
+        opts.meshRoot = next();
+        break;
+      case '--mesh-channel':
+        opts.meshChannels.push(...parseList(next()));
         break;
       case '--no-update-check':
         opts.updateCheck = false;
@@ -175,6 +232,25 @@ Hosting:
       --health-details  Let /health report user and session counts
       --max-connections-per-ip <n>   Default ${DEFAULTS.maxConnectionsPerIp}
       --registrations-per-hour <n>   Default ${DEFAULTS.maxRegistrationsPerIpPerHour} per IP
+
+History and rooms:
+      --no-history      Keep no message history on the server at all
+      --history-days <n>  Delete anything older than n days (0 = forever)
+      --history-max <n>   Messages kept per conversation (default ${HISTORY_DEFAULTS.maxPerConversation})
+      --no-rooms        Disable chat rooms
+      --no-room-creation  Rooms stay, but only the operator can add them
+
+Meshtastic bridge (needs the MQTT module with JSON output switched on):
+      --mqtt-host <h>   Broker to bridge through; enables the bridge
+      --mqtt-port <n>   Default 1883, or 8883 with --mqtt-tls
+      --mqtt-tls        Connect to the broker over TLS
+      --mqtt-user <u>   Broker username
+      --mqtt-password <p>  Broker password (prefer OPENICQ_MQTT_PASSWORD)
+      --mesh-root <t>   Topic root, e.g. msh/US (default msh/US)
+      --mesh-channel <c>  Channel to bridge, repeatable (default LongFast)
+
+Anything said in a bridged room is transmitted over the radio, where anyone in
+range with the channel key can read it. Treat bridged rooms as public.
 
 Updates:
       --check-update    Ask GitHub whether a newer release exists, then exit
@@ -336,12 +412,42 @@ function main() {
     maxConnectionsPerIp: opts.maxConnectionsPerIp,
     maxRegistrationsPerIpPerHour: opts.registrationsPerHour,
   });
+  const history = new History({
+    file: path.join(path.dirname(opts.data), 'history.jsonl'),
+    enabled: opts.history,
+    maxAgeDays: opts.historyDays,
+    maxPerConversation: opts.historyMax,
+  });
+  const rooms = opts.rooms ? new Rooms(store) : null;
+
   const hub = new Hub(store, {
     allowRegistration: opts.allowRegistration,
+    allowRoomCreation: opts.allowRoomCreation,
     motd: opts.motd,
     limits,
+    history,
+    rooms,
     announceUpdates: opts.announceUpdates,
   });
+
+  let bridge = null;
+  if (opts.mqttHost) {
+    if (!rooms) {
+      console.error('[mesh] the bridge needs chat rooms; drop --no-rooms to use it');
+    } else {
+      bridge = new MeshtasticBridge({
+        hub,
+        rooms,
+        host: opts.mqttHost,
+        port: opts.mqttPort,
+        tls: opts.mqttTls,
+        username: opts.mqttUser,
+        password: opts.mqttPassword,
+        root: opts.meshRoot,
+        channels: opts.meshChannels,
+      });
+    }
+  }
 
   const isTrustedProxy = makeProxyMatcher(opts.trustProxy);
   const trustAllProxies = opts.trustProxy.includes('all');
@@ -374,20 +480,40 @@ function main() {
   const headers = { ...SECURITY_HEADERS };
   if (opts.hsts) headers['strict-transport-security'] = 'max-age=31536000; includeSubDomains';
 
+  /**
+   * Whether the browser considers this origin trustworthy, which is what
+   * decides if Cross-Origin-Opener-Policy is worth sending. HTTPS is only
+   * believed from a proxy we were told to trust, since anyone can claim it.
+   */
+  const isSecureOrigin = (req) => {
+    if (isTrustedProxy(req.socket ? req.socket.remoteAddress || '' : '')) {
+      const proto = parseList(req.headers['x-forwarded-proto'])[0];
+      if (proto) return proto.toLowerCase() === 'https';
+    }
+    const hostHeader = String(req.headers.host || '').toLowerCase();
+    const host = hostHeader.startsWith('[')
+      ? hostHeader.slice(0, hostHeader.indexOf(']') + 1)
+      : hostHeader.split(':')[0];
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+  };
+
+  const headersFor = (req) => (isSecureOrigin(req) ? { ...headers, ...COOP } : headers);
+
   const server = http.createServer((req, res) => {
+    const sent = headersFor(req);
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405, { ...headers, allow: 'GET, HEAD' }).end('Method not allowed');
+      res.writeHead(405, { ...sent, allow: 'GET, HEAD' }).end('Method not allowed');
       return;
     }
     if ((req.url || '').split('?')[0] === '/health') {
       const body = opts.healthDetails
         ? { ok: true, users: store.userCount, online: hub.sessions.size }
         : { ok: true };
-      res.writeHead(200, { ...headers, 'content-type': 'application/json' });
+      res.writeHead(200, { ...sent, 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
       return;
     }
-    serveStatic(req, res, headers);
+    serveStatic(req, res, sent);
   });
 
   // Keep half-open and slow-header connections from piling up.
@@ -434,6 +560,8 @@ function main() {
       console.log(`  Network  : http://${address}:${opts.port}`);
     }
     console.log(`  Sign-ups : ${opts.allowRegistration ? 'open' : 'closed'}`);
+    console.log(`  History  : ${history.describeRetention()}`);
+    console.log(`  Rooms    : ${rooms ? `${rooms.all.length} (${opts.allowRoomCreation ? 'anyone may create' : 'operator only'})` : 'disabled'}`);
     console.log(`  Origins  : ${opts.origins.length ? opts.origins.join(', ') : 'any (set --origin when public)'}`);
     if (opts.trustProxy.length) {
       console.log(`  Proxies  : ${opts.trustProxy.join(', ')}`);
@@ -460,13 +588,17 @@ function main() {
     setInterval(announce, 24 * 60 * 60 * 1000).unref();
   }
 
+  if (bridge) bridge.start();
+
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) process.exit(0);
     shuttingDown = true;
     console.log('\n[openicq] saving database...');
     store.flushSync();
+    history.close();
     limits.stop();
+    if (bridge) bridge.stop();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1500).unref();
   };
@@ -479,11 +611,13 @@ function main() {
   process.on('uncaughtException', (err) => {
     console.error('[openicq] uncaught exception:', err);
     store.flushSync();
+    history.close();
     process.exit(1);
   });
   process.on('unhandledRejection', (err) => {
     console.error('[openicq] unhandled rejection:', err);
     store.flushSync();
+    history.close();
     process.exit(1);
   });
 }

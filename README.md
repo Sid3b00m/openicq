@@ -164,8 +164,15 @@ the proxy and the per-IP limits protect nothing.
   Invisible, plus a status message. Invisible really does read as offline to
   everyone else.
 - **Offline messages** are stored on the server and delivered at next sign-on.
-- **Typing notifications**, delivery acknowledgements and local message
-  history you can browse or clear per contact.
+- **Typing notifications**, delivery acknowledgements and message history you
+  can browse or clear per contact.
+- **Server-side history**, so a conversation follows you to another machine
+  instead of living in one browser. The operator can cap it, age it out, or
+  switch it off entirely.
+- **Chat rooms** with topics, occupant lists and replayed history on join.
+- **A Meshtastic bridge.** Point the server at a mesh MQTT broker and a radio
+  channel becomes a chat room — messages cross in both directions, so people
+  on handhelds and people in browsers share one conversation.
 - **Multiple devices** on one UIN at the same time; your own messages echo to
   your other sessions.
 - **The sounds.** Message alert, door-open on sign-on, door-close on sign-off.

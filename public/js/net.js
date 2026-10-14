@@ -6,20 +6,25 @@
   const SERVER_KEY = 'openicq.server';
   const MAX_BACKOFF = 15000;
 
+  function pageScheme() {
+    return location.protocol === 'https:' ? 'wss' : 'ws';
+  }
+
   function resolveUrl() {
     const override =
       new URLSearchParams(location.search).get('server') || localStorage.getItem(SERVER_KEY);
 
+    // A bare "host:port" override has to follow the page, not default to ws://:
+    // a browser blocks an insecure socket opened from an HTTPS page outright.
     if (override) {
       if (/^wss?:\/\//.test(override)) return override.replace(/\/+$/, '') + '/ws';
-      return `ws://${override.replace(/^\/+|\/+$/g, '')}/ws`;
+      return `${pageScheme()}://${override.replace(/^\/+|\/+$/g, '')}/ws`;
     }
 
     // Served over file:// (packaged desktop build without a local http origin).
     if (location.protocol === 'file:') return 'ws://localhost:5190/ws';
 
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    return `${scheme}://${location.host}/ws`;
+    return `${pageScheme()}://${location.host}/ws`;
   }
 
   const listeners = new Map();

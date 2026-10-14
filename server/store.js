@@ -42,7 +42,12 @@ function toSafeMap(source) {
 class Store {
   constructor(file) {
     this.file = file;
-    this.db = { version: 1, nextUin: FIRST_UIN, users: Object.create(null) };
+    this.db = {
+      version: 1,
+      nextUin: FIRST_UIN,
+      users: Object.create(null),
+      rooms: Object.create(null),
+    };
     this.nickIndex = new Map(); // lowercase nick -> uin
     this._flushTimer = null;
     this._writing = false;
@@ -58,6 +63,9 @@ class Store {
         this.db.version = parsed.version || 1;
         this.db.nextUin = Number(parsed.nextUin) || FIRST_UIN;
         this.db.users = toSafeMap(parsed.users);
+        if (parsed.rooms && typeof parsed.rooms === 'object') {
+          this.db.rooms = toSafeMap(parsed.rooms);
+        }
       }
     } catch (err) {
       if (err.code !== 'ENOENT') {

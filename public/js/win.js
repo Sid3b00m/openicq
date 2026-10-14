@@ -352,6 +352,20 @@
     });
   }
 
+  /** @returns {Promise<boolean>} */
+  function confirm({ title, icon, message, okLabel = 'OK', cancelLabel = 'Cancel', sound }) {
+    return dialog({
+      title,
+      icon,
+      message,
+      sound,
+      buttons: [
+        { label: okLabel, value: true, default: true },
+        { label: cancelLabel, value: false },
+      ],
+    });
+  }
+
   function escapeHtml(value) {
     return String(value).replace(
       /[&<>"']/g,
@@ -359,5 +373,5 @@
     );
   }
 
-  global.Win = { create, get, menu, hideMenu, dialog, escapeHtml, windows };
+  global.Win = { create, get, menu, hideMenu, dialog, confirm, escapeHtml, windows };
 })(window);

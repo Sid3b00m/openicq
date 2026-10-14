@@ -10,6 +10,8 @@
 
 const crypto = require('crypto');
 const { STATUSES, normalizeProfile, isValidUin } = require('./store');
+const { isValidRoomId, MAX_TOPIC } = require('./rooms');
+const { dmKey, roomKey } = require('./history');
 const kdf = require('./kdf');
 
 const MAX_BODY = 4000;
@@ -17,6 +19,8 @@ const MAX_NICK = 24;
 const MIN_NICK = 2;
 const MIN_SEARCH = 2;
 const MAX_CONTACTS = 500;
+const MAX_JOINED_ROOMS = 30;
+const HISTORY_PAGE = 200;
 const RATE_BURST = 40;
 const RATE_REFILL_PER_SEC = 8;
 
@@ -28,11 +32,16 @@ class Hub {
   constructor(store, options = {}) {
     this.store = store;
     this.limits = options.limits;
+    this.history = options.history || null;
+    this.rooms = options.rooms || null;
     this.sessions = new Map(); // uin -> Set<Session>
     this.allowRegistration = options.allowRegistration !== false;
+    this.allowRoomCreation = options.allowRoomCreation !== false;
     this.motd = options.motd || '';
     this.announceUpdates = !!options.announceUpdates;
     this.updateStatus = null; // set by the update checker in index.js
+    /** Set by the Meshtastic bridge so room messages can be relayed out. */
+    this.onRoomMessage = null;
   }
 
   handleConnection(ws) {
@@ -43,6 +52,8 @@ class Hub {
       version: require('../package.json').version,
       users: this.store.userCount,
       registration: this.allowRegistration,
+      rooms: !!this.rooms,
+      serverHistory: !!(this.history && this.history.enabled),
       motd: this.motd,
       // Only when the operator asked for it: by default a pending update is
       // the host's business, not every visitor's.
@@ -118,6 +129,64 @@ class Hub {
     for (const s of set) if (s !== session) s.ws.sendJSON(payload);
   }
 
+  // --- rooms ---------------------------------------------------------------
+
+  /** Send to everyone currently in a room, optionally skipping one session. */
+  sendToRoom(roomId, payload, except = null) {
+    if (!this.rooms) return 0;
+    const set = this.rooms.members(roomId);
+    if (!set) return 0;
+    let sent = 0;
+    for (const session of set) {
+      if (session === except) continue;
+      session.ws.sendJSON(payload);
+      sent++;
+    }
+    return sent;
+  }
+
+  /** Tell a room its occupant list changed. */
+  broadcastRoomPresence(roomId) {
+    if (!this.rooms) return;
+    this.sendToRoom(roomId, {
+      t: 'room-presence',
+      room: roomId,
+      occupants: this.rooms.occupants(roomId),
+    });
+  }
+
+  /**
+   * Deliver a room message to everyone present, record it, and hand it to any
+   * bridge that is listening.
+   *
+   * Used by both the `room-message` handler and the Meshtastic bridge, so
+   * messages arriving from the mesh go through exactly the same path.
+   *
+   * @param {{room: string, from: string, fromNick: string, body: string, source?: string}} message
+   */
+  deliverRoomMessage({ room, from, fromNick, body, source = null }, except = null) {
+    const packet = {
+      id: crypto.randomUUID(),
+      room,
+      from,
+      fromNick,
+      body,
+      ts: Date.now(),
+    };
+    if (source) packet.source = source;
+
+    this.sendToRoom(room, { t: 'room-message', ...packet }, except);
+    if (this.history) this.history.recordRoom(packet);
+    if (this.onRoomMessage) {
+      try {
+        this.onRoomMessage(packet);
+      } catch (err) {
+        console.error('[protocol] room message relay failed:', err.message);
+      }
+    }
+    return packet;
+  }
+
   /** Tell everyone who has `user` on their list about a presence change. */
   broadcastPresence(uin) {
     const user = this.store.getUser(uin);
@@ -146,6 +215,7 @@ class Session {
     this.tokens = RATE_BURST;
     this.lastRefill = Date.now();
     this.authInFlight = false;
+    this.joinedRooms = new Set();
   }
 
   get authed() {
@@ -200,10 +270,18 @@ class Session {
 
   onClose() {
     if (!this.authed) return;
+
+    // Drop out of every room first, then tell those rooms, otherwise the
+    // occupant list still contains this connection.
+    const left = this.hub.rooms ? this.hub.rooms.leaveAll(this) : [];
+    this.joinedRooms.clear();
+
     this.user.lastSeen = Date.now();
     this.store.markDirty();
     this.hub.unregister(this);
     this.hub.broadcastPresence(this.uin);
+
+    for (const roomId of left) this.hub.broadcastRoomPresence(roomId);
   }
 
   /** Contact-list entry shaped for the client. */
@@ -543,6 +621,10 @@ handler('message', true, (s, msg) => {
   const deliveredLive = s.hub.sendTo(to, { t: 'message', ...packet, offline: false });
   if (!deliveredLive) s.store.queueOffline(target, packet);
 
+  // Recorded whether or not it was delivered live, so both sides see the same
+  // conversation when they next ask for it.
+  if (s.hub.history) s.hub.history.recordDirect(packet);
+
   // An invisible recipient must look exactly like an absent one, so the ack
   // reports what the sender is allowed to know, not what actually happened.
   const visible = visibleStatus !== 'offline';
@@ -621,6 +703,211 @@ handler(
   },
   { cost: 8 }
 );
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+handler(
+  'get-history',
+  true,
+  (s, msg) => {
+    if (!s.hub.history || !s.hub.history.enabled) {
+      return s.fail('no-history', 'This server does not keep message history.');
+    }
+
+    const limit = Math.min(Number(msg.limit) || 100, HISTORY_PAGE);
+    const before = Number(msg.before) || 0;
+
+    if (msg.room !== undefined) {
+      const room = clean(msg.room, 48);
+      if (!isValidRoomId(room) || !s.hub.rooms || !s.hub.rooms.exists(room)) {
+        return s.fail('no-such-room', 'No such room.');
+      }
+      return s.ws.sendJSON({
+        t: 'history',
+        room,
+        entries: s.hub.history.readRoom(room, { limit, before }),
+      });
+    }
+
+    const withUin = uinArg(msg.with);
+    if (!withUin) return s.fail('no-such-user', 'No such UIN.');
+    s.ws.sendJSON({
+      t: 'history',
+      with: withUin,
+      entries: s.hub.history.readDirect(s.uin, withUin, { limit, before }),
+    });
+  },
+  { cost: 3 }
+);
+
+handler('clear-history', true, (s, msg) => {
+  if (!s.hub.history || !s.hub.history.enabled) {
+    return s.fail('no-history', 'This server does not keep message history.');
+  }
+  const withUin = uinArg(msg.with);
+  if (!withUin) return s.fail('no-such-user', 'No such UIN.');
+
+  // Both people share one conversation, so this clears it for them too. Say so
+  // plainly rather than pretending it is private to the caller.
+  s.hub.history.forgetDirect(s.uin, withUin);
+  s.ws.sendJSON({ t: 'history-cleared', with: withUin });
+  s.hub.sendTo(withUin, { t: 'history-cleared', with: s.uin, by: s.uin });
+});
+
+// ---------------------------------------------------------------------------
+// Rooms
+// ---------------------------------------------------------------------------
+
+/** Rooms are optional; every handler below needs them switched on. */
+function roomsOrFail(s) {
+  if (!s.hub.rooms) {
+    s.fail('no-rooms', 'This server does not have chat rooms.');
+    return null;
+  }
+  return s.hub.rooms;
+}
+
+handler(
+  'list-rooms',
+  true,
+  (s) => {
+    const rooms = roomsOrFail(s);
+    if (!rooms) return;
+    s.ws.sendJSON({ t: 'room-list', rooms: rooms.list(), canCreate: s.hub.allowRoomCreation });
+  },
+  { cost: 2 }
+);
+
+handler(
+  'create-room',
+  true,
+  (s, msg) => {
+    const rooms = roomsOrFail(s);
+    if (!rooms) return;
+    if (!s.hub.allowRoomCreation) {
+      return s.fail('rooms-closed', 'This server is not accepting new rooms.');
+    }
+
+    const result = rooms.create({
+      name: clean(msg.name, 32),
+      topic: clean(msg.topic, MAX_TOPIC),
+      owner: s.uin,
+    });
+    if (result.error) return s.fail(result.code, result.error);
+
+    console.log(`[openicq] ${s.user.nick} created room "${result.room.name}" (${result.room.id})`);
+    s.ws.sendJSON({ t: 'room-created', room: rooms.view(result.room.id) });
+
+    // Everyone browsing the room list wants to know.
+    for (const set of s.hub.sessions.values()) {
+      for (const other of set) {
+        if (other !== s) other.ws.sendJSON({ t: 'room-added', room: rooms.view(result.room.id) });
+      }
+    }
+  },
+  { cost: 5 }
+);
+
+handler('join-room', true, (s, msg) => {
+  const rooms = roomsOrFail(s);
+  if (!rooms) return;
+
+  const roomId = clean(msg.room, 48);
+  if (!isValidRoomId(roomId)) return s.fail('no-such-room', 'No such room.');
+  if (s.joinedRooms.size >= MAX_JOINED_ROOMS && !s.joinedRooms.has(roomId)) {
+    return s.fail('too-many-rooms', 'You are in as many rooms as this server allows.');
+  }
+
+  const result = rooms.join(roomId, s);
+  if (result.error) return s.fail(result.code, result.error);
+  s.joinedRooms.add(roomId);
+
+  s.ws.sendJSON({
+    t: 'room-joined',
+    room: rooms.view(roomId),
+    occupants: rooms.occupants(roomId),
+    history: s.hub.history ? s.hub.history.readRoom(roomId, { limit: 100 }) : [],
+  });
+
+  s.hub.sendToRoom(roomId, { t: 'room-entered', room: roomId, uin: s.uin, nick: s.user.nick }, s);
+  s.hub.broadcastRoomPresence(roomId);
+});
+
+handler('leave-room', true, (s, msg) => {
+  const rooms = roomsOrFail(s);
+  if (!rooms) return;
+
+  const roomId = clean(msg.room, 48);
+  if (!s.joinedRooms.has(roomId)) return s.fail('not-in-room', 'You are not in that room.');
+
+  rooms.leave(roomId, s);
+  s.joinedRooms.delete(roomId);
+
+  s.ws.sendJSON({ t: 'room-left', room: roomId });
+  s.hub.sendToRoom(roomId, { t: 'room-exited', room: roomId, uin: s.uin, nick: s.user.nick });
+  s.hub.broadcastRoomPresence(roomId);
+});
+
+handler('room-message', true, (s, msg) => {
+  const rooms = roomsOrFail(s);
+  if (!rooms) return;
+
+  const roomId = clean(msg.room, 48);
+  const body = clean(msg.body, MAX_BODY);
+  const ref = clean(msg.id, 40) || crypto.randomUUID();
+
+  if (!body) return;
+  if (!s.joinedRooms.has(roomId)) return s.fail('not-in-room', 'Join the room first.');
+  if (!rooms.exists(roomId)) return s.fail('no-such-room', 'No such room.');
+
+  // The sender's own window already shows the line, so skip them on the
+  // broadcast and acknowledge instead.
+  const packet = s.hub.deliverRoomMessage(
+    { room: roomId, from: s.uin, fromNick: s.user.nick, body },
+    s
+  );
+
+  s.ws.sendJSON({ t: 'room-ack', ref, id: packet.id, room: roomId, ts: packet.ts });
+});
+
+handler('set-room-topic', true, (s, msg) => {
+  const rooms = roomsOrFail(s);
+  if (!rooms) return;
+
+  const roomId = clean(msg.room, 48);
+  const result = rooms.setTopic(roomId, clean(msg.topic, MAX_TOPIC), s.uin);
+  if (result.error) return s.fail(result.code, result.error);
+
+  s.hub.sendToRoom(roomId, { t: 'room-topic', room: roomId, topic: result.room.topic, by: s.user.nick });
+  s.ws.sendJSON({ t: 'room-topic', room: roomId, topic: result.room.topic, by: s.user.nick });
+});
+
+handler('remove-room', true, (s, msg) => {
+  const rooms = roomsOrFail(s);
+  if (!rooms) return;
+
+  const roomId = clean(msg.room, 48);
+  const result = rooms.remove(roomId, s.uin);
+  if (result.error) return s.fail(result.code, result.error);
+
+  s.hub.sendToRoom(roomId, { t: 'room-removed', room: roomId });
+  for (const set of s.hub.sessions.values()) {
+    for (const other of set) other.ws.sendJSON({ t: 'room-removed', room: roomId });
+  }
+});
+
+handler('room-typing', true, (s, msg) => {
+  if (!s.hub.rooms) return;
+  const roomId = clean(msg.room, 48);
+  if (!s.joinedRooms.has(roomId)) return;
+  s.hub.sendToRoom(
+    roomId,
+    { t: 'room-typing', room: roomId, from: s.uin, nick: s.user.nick, state: msg.state === 'start' ? 'start' : 'stop' },
+    s
+  );
+});
 
 function publicUser(user, self) {
   const view = {

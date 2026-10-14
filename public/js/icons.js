@@ -78,6 +78,21 @@
     history:
       '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.6" fill="#fff" stroke="#303030"/>' +
       '<path d="M8 4v4.4l3 1.8" fill="none" stroke="#303030" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    room:
+      '<svg viewBox="0 0 16 16"><rect x="1" y="2.5" width="11" height="8" fill="#fffbd0" stroke="#806000"/>' +
+      '<path d="M3.5 9.5 3 13.5 6.5 10.5" fill="#fffbd0" stroke="#806000"/>' +
+      '<path d="M3.5 5h6M3.5 7.2h4" stroke="#806000"/>' +
+      '<rect x="8" y="6" width="7" height="5.5" fill="#cfe4ff" stroke="#243a5e"/>' +
+      '<path d="M13 10.8 13.6 14 11 12" fill="#cfe4ff" stroke="#243a5e"/></svg>',
+    'room-new':
+      '<svg viewBox="0 0 16 16"><rect x="1" y="2.5" width="11" height="8" fill="#ffe14a" stroke="#806000"/>' +
+      '<path d="M3.5 9.5 3 13.5 6.5 10.5" fill="#ffe14a" stroke="#806000"/>' +
+      '<circle cx="12.5" cy="4" r="3.3" fill="#d00000" stroke="#600000"/></svg>',
+    mesh:
+      '<svg viewBox="0 0 16 16"><path d="M8 11.5V6" stroke="#243a5e" stroke-width="1.6"/>' +
+      '<path d="M4.6 5.4a4.8 4.8 0 0 1 6.8 0M2.4 3.2a7.9 7.9 0 0 1 11.2 0" fill="none" stroke="#2fb43a" stroke-width="1.5" stroke-linecap="round"/>' +
+      '<circle cx="8" cy="7.2" r="1.7" fill="#2fb43a" stroke="#167a1d"/>' +
+      '<rect x="5.5" y="11.5" width="5" height="3" fill="#b0b0b0" stroke="#404040"/></svg>',
   };
 
   function glyph(name) {

@@ -381,6 +381,40 @@ Every option is both a flag and an environment variable. `node server/index.js
 
 Raise the last two if real users share one address behind NAT.
 
+### History and rooms
+
+| Flag | Variable | Default | What it does |
+| --- | --- | --- | --- |
+| `--no-history` | `OPENICQ_HISTORY=off` | on | Keep no message history on the server at all |
+| `--history-max <n>` | `OPENICQ_HISTORY_MAX` | `500` | Messages kept per conversation |
+| `--history-days <n>` | `OPENICQ_HISTORY_DAYS` | `0` | Delete anything older than n days; `0` keeps them forever |
+| `--no-rooms` | `OPENICQ_ROOMS=off` | on | Disable chat rooms |
+| `--no-room-creation` | `OPENICQ_ROOM_CREATION=off` | anyone | Rooms stay, but only the operator can add them |
+
+History is what makes a conversation follow you between machines: it is stored
+on the server, so a second device sees the same thread. Each side can clear a
+conversation for themselves at any time.
+
+### Meshtastic bridge
+
+Bridges a [Meshtastic](https://meshtastic.org) channel onto a chat room, so
+radio traffic and browser traffic land in the same place. It needs the MQTT
+module switched on at the gateway node, with JSON output enabled.
+
+| Flag | Variable | Default | What it does |
+| --- | --- | --- | --- |
+| `--mqtt-host <h>` | `OPENICQ_MQTT_HOST` | none | Broker to bridge through; setting it enables the bridge |
+| `--mqtt-port <n>` | `OPENICQ_MQTT_PORT` | `1883`, or `8883` with TLS | Broker port |
+| `--mqtt-tls` | `OPENICQ_MQTT_TLS=on` | off | Connect to the broker over TLS |
+| `--mqtt-user <u>` | `OPENICQ_MQTT_USER` | none | Broker username |
+| `--mqtt-password <p>` | `OPENICQ_MQTT_PASSWORD` | none | Broker password; prefer the variable so it stays out of `ps` |
+| `--mesh-root <t>` | `OPENICQ_MESH_ROOT` | `msh/US` | Topic root, matching the gateway's region |
+| `--mesh-channel <c>` | `OPENICQ_MESH_CHANNELS` | `LongFast` | Channel to bridge; repeat the flag for more |
+
+A bridged room is created automatically and cannot be renamed or removed from
+the client. Anything said in one is transmitted over the radio, where anyone in
+range with the channel key can read it — treat bridged rooms as public.
+
 ### Updates
 
 | Flag | Variable | Default | What it does |

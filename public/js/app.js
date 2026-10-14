@@ -17,6 +17,10 @@
     statusMessage: '',
     contacts: new Map(), // uin -> contact
     chats: new Map(), // uin -> chat
+    rooms: new Map(), // room id -> open room window
+    roomList: null, // the room browser, while it is open
+    serverHistory: false, // does this server keep history for us?
+    roomsEnabled: false,
     pendingAuth: [],
     mainWin: null,
     selected: null,
@@ -111,8 +115,40 @@
   }
 
   // ---------------------------------------------------------------------
-  // Local message history
+  // Message history
+  //
+  // The server keeps the real record when it offers one, which is what makes a
+  // conversation follow you between devices and browsers. localStorage is only
+  // the fallback for servers with history switched off; it is scoped to one
+  // origin, so it never travelled anywhere.
   // ---------------------------------------------------------------------
+
+  const historyWaiters = new Map(); // conversation key -> callbacks
+
+  function conversationKey({ with: withUin, room }) {
+    return room ? `room:${room}` : `dm:${withUin}`;
+  }
+
+  /**
+   * Ask the server for a slice of a conversation.
+   * @param {{with?: string, room?: string, limit?: number, before?: number}} params
+   * @param {(entries: object[]) => void} fn
+   */
+  function requestHistory(params, fn) {
+    const key = conversationKey(params);
+    const waiting = historyWaiters.get(key) || [];
+    waiting.push(fn);
+    historyWaiters.set(key, waiting);
+    Net.send('get-history', params);
+  }
+
+  function deliverHistory(msg) {
+    const key = conversationKey(msg);
+    const waiting = historyWaiters.get(key);
+    if (!waiting) return;
+    historyWaiters.delete(key);
+    for (const fn of waiting) fn(msg.entries || []);
+  }
 
   function historyKey(uin) {
     return `openicq.history.${state.me?.uin}.${uin}`;
@@ -135,6 +171,9 @@
   }
 
   function pushHistory(uin, entry) {
+    // When the server keeps history it is already recording this. Writing a
+    // second copy here would show every line twice on the next reopen.
+    if (state.serverHistory) return;
     const entries = loadHistory(uin);
     entries.push(entry);
     saveHistory(uin, entries);
@@ -477,6 +516,12 @@
     const items = [
       { label: 'My Details\u2026', icon: glyph('user'), action: openMyDetails },
       { label: 'Add/Find Users\u2026', icon: glyph('search'), action: openFindWindow },
+      {
+        label: 'Chat Rooms\u2026',
+        icon: glyph('room'),
+        action: openRoomBrowser,
+        disabled: !state.roomsEnabled,
+      },
       { label: 'Change Password\u2026', icon: glyph('key'), action: openChangePassword },
       '-',
       {
@@ -650,6 +695,243 @@
     state.findBox = box;
     state.findResults = body.querySelector('[data-results]');
     state.findCount = body.querySelector('[data-count]');
+  }
+
+  // ---------------------------------------------------------------------
+  // Chat rooms
+  // ---------------------------------------------------------------------
+
+  function openRoomBrowser() {
+    if (!state.roomsEnabled) {
+      notify('Chat Rooms', 'This server does not have chat rooms.', 'error');
+      return;
+    }
+    if (state.roomList) {
+      state.roomList.box.focus();
+      Net.send('list-rooms', {});
+      return;
+    }
+
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <div class="result-list" data-rooms><div class="list-empty">Loading\u2026</div></div>
+      <div class="button-row">
+        <span class="hint grow" data-note></span>
+        <button type="button" class="btn slim" data-refresh>Refresh</button>
+        <button type="button" class="btn slim" data-create>Create Room\u2026</button>
+      </div>`;
+
+    const box = Win.create({
+      id: 'rooms',
+      title: 'Chat Rooms',
+      icon: glyph('room'),
+      width: 380,
+      height: 340,
+      body,
+      center: true,
+      onClose: () => {
+        state.roomList = null;
+      },
+    });
+
+    body.querySelector('[data-refresh]').addEventListener('click', () => Net.send('list-rooms', {}));
+    body.querySelector('[data-create]').addEventListener('click', createRoom);
+
+    state.roomList = {
+      box,
+      list: body.querySelector('[data-rooms]'),
+      note: body.querySelector('[data-note]'),
+      create: body.querySelector('[data-create]'),
+    };
+    Net.send('list-rooms', {});
+  }
+
+  function renderRoomList(msg) {
+    const ui = state.roomList;
+    if (!ui) return;
+
+    ui.create.disabled = msg.canCreate === false;
+    ui.note.textContent = msg.canCreate === false ? 'Only the operator can add rooms here.' : '';
+
+    ui.list.innerHTML = '';
+    if (!msg.rooms.length) {
+      ui.list.innerHTML = '<div class="list-empty">No rooms yet. Make the first one.</div>';
+      return;
+    }
+
+    for (const room of msg.rooms) {
+      const row = document.createElement('div');
+      row.className = 'result-row';
+      const joined = state.rooms.has(room.id);
+      row.innerHTML =
+        `<span data-glyph="${room.managed ? 'mesh' : 'room'}"></span>` +
+        `<span class="grow"><b>${esc(room.name)}</b> ` +
+        `<span class="hint">${room.occupants} here${room.topic ? ` \u2013 ${esc(room.topic)}` : ''}</span></span>` +
+        `<button type="button" class="btn slim">${joined ? 'Open' : 'Join'}</button>`;
+      ICQIcons.hydrate(row);
+
+      row.querySelector('button').addEventListener('click', () => {
+        if (state.rooms.has(room.id)) openRoomWindow(room.id, room.name).win.focus();
+        else Net.send('join-room', { room: room.id });
+      });
+      ui.list.appendChild(row);
+    }
+  }
+
+  async function createRoom() {
+    const name = await promptBox({
+      title: 'Create Room',
+      icon: glyph('room'),
+      label: 'Room name:',
+      value: '',
+      okLabel: 'Create',
+    });
+    if (!name) return;
+    const topic = await promptBox({
+      title: 'Create Room',
+      icon: glyph('room'),
+      label: `Topic for "${name}" (optional):`,
+      value: '',
+      okLabel: 'Create',
+    });
+    if (topic === null) return;
+    Net.send('create-room', { name, topic });
+  }
+
+  /** Open (or focus) the window for a room. */
+  function openRoomWindow(roomId, name, background) {
+    let room = state.rooms.get(roomId);
+    if (room) {
+      if (!background) {
+        room.win.focus();
+        room.input.focus();
+      }
+      return room;
+    }
+
+    const body = document.createElement('div');
+    body.style.padding = '0';
+    body.innerHTML = `
+      <div class="chat-head">
+        <span data-head-glyph></span>
+        <div style="min-width:0">
+          <div class="who"></div>
+          <div class="meta"></div>
+        </div>
+      </div>
+      <div class="room-split">
+        <div class="chat-log" data-log></div>
+        <div class="room-occupants" data-occupants></div>
+      </div>
+      <div class="chat-compose">
+        <textarea class="field" data-input placeholder="Type a message and press Enter\u2026"></textarea>
+        <div class="chat-actions">
+          <span class="typing-note" data-typing></span>
+          <button type="button" class="btn slim" data-topic>Topic\u2026</button>
+          <button type="button" class="btn slim" data-leave>Leave</button>
+          <button type="button" class="btn" data-send>Send</button>
+        </div>
+      </div>`;
+
+    const win = Win.create({
+      id: `room-${roomId}`,
+      title: name || roomId,
+      icon: glyph('room'),
+      className: 'chat-window',
+      width: 520,
+      height: 400,
+      body,
+      focusOnCreate: !background,
+      onClose: () => {
+        // Closing the window is leaving the room, same as any other client.
+        if (state.rooms.has(roomId)) Net.send('leave-room', { room: roomId });
+        state.rooms.delete(roomId);
+      },
+      onFocus: () => {
+        const r = state.rooms.get(roomId);
+        if (r) r.win.setIcon(glyph('room'));
+      },
+    });
+    win.bodyEl.style.padding = '4px';
+    win.bodyEl.style.gap = '4px';
+
+    room = {
+      id: roomId,
+      name: name || roomId,
+      win,
+      log: body.querySelector('[data-log]'),
+      input: body.querySelector('[data-input]'),
+      typingEl: body.querySelector('[data-typing]'),
+      occupantsEl: body.querySelector('[data-occupants]'),
+      who: body.querySelector('.who'),
+      meta: body.querySelector('.meta'),
+      headGlyph: body.querySelector('[data-head-glyph]'),
+      seenIds: new Set(),
+      typingSentAt: 0,
+    };
+    state.rooms.set(roomId, room);
+    room.who.textContent = room.name;
+    room.headGlyph.innerHTML = glyph('room');
+
+    const send = () => {
+      const text = room.input.value.replace(/\s+$/, '');
+      if (!text) return;
+      room.input.value = '';
+      Net.send('room-message', { room: roomId, body: text, id: `r${Date.now()}` });
+      Net.send('room-typing', { room: roomId, state: 'stop' });
+      appendLine(room, { who: 'me', nick: state.me.nick, body: text, ts: Date.now() });
+      Sounds.play('sent');
+    };
+
+    body.querySelector('[data-send]').addEventListener('click', send);
+    body.querySelector('[data-leave]').addEventListener('click', () => win.close());
+    body.querySelector('[data-topic]').addEventListener('click', async () => {
+      const topic = await promptBox({
+        title: `Topic: ${room.name}`,
+        icon: glyph('room'),
+        label: 'Room topic:',
+        value: room.topic || '',
+        okLabel: 'Set Topic',
+      });
+      if (topic === null) return;
+      Net.send('set-room-topic', { room: roomId, topic });
+    });
+
+    room.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        send();
+        return;
+      }
+      const now = Date.now();
+      if (now - room.typingSentAt > TYPING_IDLE_MS) {
+        room.typingSentAt = now;
+        Net.send('room-typing', { room: roomId, state: 'start' });
+      }
+    });
+
+    return room;
+  }
+
+  function renderOccupants(room, occupants) {
+    room.occupants = occupants;
+    room.occupantsEl.innerHTML =
+      `<div class="room-occupants-head">${occupants.length} here</div>` +
+      occupants
+        .map((p) => `<div class="room-occupant" title="UIN ${esc(p.uin)}">${esc(p.nick)}</div>`)
+        .join('');
+  }
+
+  function updateRoomHead(room, view) {
+    if (view) {
+      room.name = view.name;
+      room.topic = view.topic;
+      room.managed = view.managed;
+      room.win.setTitle(`${view.name}${view.managed ? ' \u2013 mesh' : ''}`);
+      room.headGlyph.innerHTML = glyph(view.managed ? 'mesh' : 'room');
+    }
+    room.who.textContent = room.name;
+    room.meta.textContent = room.topic || (room.managed ? 'Bridged to Meshtastic' : 'No topic set');
   }
 
   function renderSearchResults(msg) {
@@ -847,22 +1129,7 @@
       }
     });
 
-    // Replay what we said before, so reopening a window is not amnesia.
-    const history = loadHistory(uin);
-    if (history.length) {
-      const recent = history.slice(-40);
-      appendSystem(chat, `\u2014 ${recent.length} earlier message${recent.length === 1 ? '' : 's'} \u2014`);
-      for (const entry of recent) {
-        appendLine(chat, {
-          who: entry.dir === 'out' ? 'me' : 'them',
-          nick: entry.dir === 'out' ? state.me.nick : nick,
-          body: entry.body,
-          ts: entry.ts,
-          quiet: true,
-        });
-      }
-      appendSystem(chat, '\u2014 end of history \u2014');
-    }
+    replayHistory(chat, uin, nick);
 
     if (contact && !contact.authorized) {
       appendSystem(chat, 'This contact has not authorized you yet. Messages still go through.');
@@ -870,6 +1137,54 @@
 
     if (!background) setTimeout(() => chat.input.focus(), 50);
     return chat;
+  }
+
+  /** Fill a freshly opened window with what was said before. */
+  function replayHistory(chat, uin, nick) {
+    if (chat.historyLoaded) return;
+    chat.historyLoaded = true;
+
+    const render = (entries, fromServer) => {
+      // A message that arrived while we were waiting for the server is already
+      // on screen and also in what came back; show it once.
+      const fresh = entries.filter((e) => !(e.id && chat.seenIds && chat.seenIds.has(e.id)));
+      if (!fresh.length) return;
+
+      // Goes above whatever is already in the log, so a live message that beat
+      // the response stays at the bottom where it belongs.
+      const block = document.createDocumentFragment();
+      block.appendChild(buildSystem(`\u2014 ${fresh.length} earlier message${fresh.length === 1 ? '' : 's'} \u2014`));
+      for (const entry of fresh) {
+        const mine = fromServer ? entry.from === state.me.uin : entry.dir === 'out';
+        if (entry.id) {
+          if (!chat.seenIds) chat.seenIds = new Set();
+          chat.seenIds.add(entry.id);
+        }
+        block.appendChild(
+          buildLine({
+            who: mine ? 'me' : 'them',
+            nick: mine ? state.me.nick : nick,
+            body: entry.body,
+            ts: entry.ts,
+          })
+        );
+      }
+      block.appendChild(buildSystem('\u2014 end of history \u2014'));
+
+      chat.log.insertBefore(block, chat.log.firstChild);
+      chat.log.scrollTop = chat.log.scrollHeight;
+    };
+
+    if (state.serverHistory) {
+      requestHistory({ with: uin, limit: 60 }, (entries) => {
+        // The window may have been closed while we waited.
+        if (state.chats.get(uin) !== chat) return;
+        render(entries, true);
+      });
+      return;
+    }
+
+    render(loadHistory(uin).slice(-40), false);
   }
 
   function updateChatHead(chat) {
@@ -882,46 +1197,47 @@
       (contact?.statusMessage ? ` \u2013 ${contact.statusMessage}` : '');
   }
 
-  function appendLine(chat, { who, nick, body, ts, quiet }) {
-    const atBottom = chat.log.scrollHeight - chat.log.scrollTop - chat.log.clientHeight < 40;
+  function buildLine({ who, nick, body, ts }) {
     const line = document.createElement('div');
     line.className = `line ${who}`;
     line.innerHTML =
       `<span class="who">${esc(nick)}</span>` +
       `<span class="stamp">${clockString(ts)}</span><br />${renderBody(body)}`;
+    return line;
+  }
+
+  function buildSystem(text, extraClass) {
+    const line = document.createElement('div');
+    line.className = `line system ${extraClass || ''}`;
+    line.textContent = text;
+    return line;
+  }
+
+  function appendLine(chat, entry) {
+    const atBottom = chat.log.scrollHeight - chat.log.scrollTop - chat.log.clientHeight < 40;
+    if (entry.id) {
+      if (!chat.seenIds) chat.seenIds = new Set();
+      chat.seenIds.add(entry.id);
+    }
+    const line = buildLine(entry);
     chat.log.appendChild(line);
-    if (atBottom || !quiet) chat.log.scrollTop = chat.log.scrollHeight;
+    if (atBottom || !entry.quiet) chat.log.scrollTop = chat.log.scrollHeight;
     return line;
   }
 
   function appendSystem(chat, text, extraClass) {
-    const line = document.createElement('div');
-    line.className = `line system ${extraClass || ''}`;
-    line.textContent = text;
+    const line = buildSystem(text, extraClass);
     chat.log.appendChild(line);
     chat.log.scrollTop = chat.log.scrollHeight;
   }
 
   function openHistory(contact) {
-    const entries = loadHistory(contact.uin);
     const body = document.createElement('div');
-
-    if (!entries.length) {
-      body.innerHTML = '<div class="list-empty">No stored history with this contact.</div>';
-    } else {
-      body.innerHTML =
-        `<div class="chat-log" style="flex:1">` +
-        entries
-          .map(
-            (e) =>
-              `<div class="line ${e.dir === 'out' ? 'me' : 'them'}">` +
-              `<span class="who">${esc(e.dir === 'out' ? state.me.nick : contact.nick)}</span>` +
-              `<span class="stamp">${dateString(e.ts)} ${clockString(e.ts)}</span><br />` +
-              `${renderBody(e.body)}</div>`
-          )
-          .join('') +
-        `</div>`;
-    }
+    const log = document.createElement('div');
+    log.className = 'chat-log';
+    log.style.flex = '1';
+    log.innerHTML = '<div class="list-empty">Loading\u2026</div>';
+    body.appendChild(log);
 
     const clear = document.createElement('div');
     clear.className = 'button-row';
@@ -938,8 +1254,46 @@
       center: true,
     });
 
-    clear.querySelector('button').addEventListener('click', () => {
-      localStorage.removeItem(historyKey(contact.uin));
+    const show = (entries, fromServer) => {
+      if (!entries.length) {
+        log.innerHTML = '<div class="list-empty">No stored history with this contact.</div>';
+        return;
+      }
+      log.innerHTML = entries
+        .map((e) => {
+          const mine = fromServer ? e.from === state.me.uin : e.dir === 'out';
+          return (
+            `<div class="line ${mine ? 'me' : 'them'}">` +
+            `<span class="who">${esc(mine ? state.me.nick : contact.nick)}</span>` +
+            `<span class="stamp">${dateString(e.ts)} ${clockString(e.ts)}</span><br />` +
+            `${renderBody(e.body)}</div>`
+          );
+        })
+        .join('');
+      log.scrollTop = log.scrollHeight;
+    };
+
+    if (state.serverHistory) {
+      requestHistory({ with: contact.uin, limit: 200 }, (entries) => show(entries, true));
+    } else {
+      show(loadHistory(contact.uin), false);
+    }
+
+    clear.querySelector('button').addEventListener('click', async () => {
+      if (state.serverHistory) {
+        // Shared record, so be honest that this affects the other person too.
+        const ok = await Win.confirm({
+          title: 'Clear History',
+          icon: glyph('history'),
+          message:
+            'This conversation is stored on the server and shared with ' +
+            `${contact.nick}. Clearing it removes it for both of you. Continue?`,
+        });
+        if (!ok) return;
+        Net.send('clear-history', { with: contact.uin });
+      } else {
+        localStorage.removeItem(historyKey(contact.uin));
+      }
       box.close();
     });
   }
@@ -955,7 +1309,7 @@
     if (msg.offline) {
       appendSystem(chat, `Sent while you were offline \u2013 ${dateString(msg.ts)} ${clockString(msg.ts)}`, 'offline-note');
     }
-    appendLine(chat, { who: 'them', nick, body: msg.body, ts: msg.ts });
+    appendLine(chat, { who: 'them', nick, body: msg.body, ts: msg.ts, id: msg.id });
     pushHistory(msg.from, { dir: 'in', body: msg.body, ts: msg.ts });
     chat.typingEl.textContent = '';
 
@@ -1046,8 +1400,14 @@
 
     for (const chat of [...state.chats.values()]) chat.win.destroy();
     state.chats.clear();
+    // Cleared first so destroying the windows does not send a leave for every
+    // room on a connection that is already going away.
+    const rooms = [...state.rooms.values()];
+    state.rooms.clear();
+    for (const room of rooms) room.win.destroy();
+    state.roomList = null;
     state.contacts.clear();
-    for (const id of ['find', 'my-details', 'change-password']) Win.get(id)?.destroy();
+    for (const id of ['find', 'rooms', 'my-details', 'change-password']) Win.get(id)?.destroy();
 
     state.mainWin?.destroy();
     state.mainWin = null;
@@ -1099,6 +1459,8 @@
         el('signon-motd').textContent = msg.motd;
       }
       el('signon-register').disabled = !msg.registration;
+      state.serverHistory = !!msg.serverHistory;
+      state.roomsEnabled = !!msg.rooms;
 
       // Shown only when the operator runs with --announce-updates.
       if (msg.update && msg.update.version) {
@@ -1187,9 +1549,138 @@
 
     Net.on('message', handleIncomingMessage);
 
+    // Something we sent from another window or device.
     Net.on('message-echo', (msg) => {
       const chat = openChatQuietly(msg.to, peerName(msg.to));
-      appendLine(chat, { who: 'me', nick: state.me.nick, body: msg.body, ts: msg.ts });
+      appendLine(chat, { who: 'me', nick: state.me.nick, body: msg.body, ts: msg.ts, id: msg.id });
+      pushHistory(msg.to, { dir: 'out', body: msg.body, ts: msg.ts });
+    });
+
+    Net.on('history', deliverHistory);
+
+    // --- rooms ---
+
+    Net.on('room-list', renderRoomList);
+
+    Net.on('room-added', () => {
+      if (state.roomList) Net.send('list-rooms', {});
+    });
+
+    Net.on('room-created', (msg) => {
+      Net.send('join-room', { room: msg.room.id });
+      if (state.roomList) Net.send('list-rooms', {});
+    });
+
+    Net.on('room-joined', (msg) => {
+      const room = openRoomWindow(msg.room.id, msg.room.name);
+      updateRoomHead(room, msg.room);
+      renderOccupants(room, msg.occupants || []);
+
+      const entries = msg.history || [];
+      if (entries.length) {
+        appendSystem(room, `\u2014 ${entries.length} earlier message${entries.length === 1 ? '' : 's'} \u2014`);
+        for (const entry of entries) {
+          appendLine(room, {
+            who: entry.from === state.me.uin ? 'me' : 'them',
+            nick: entry.nick || entry.from,
+            body: entry.body,
+            ts: entry.ts,
+            id: entry.id,
+            quiet: true,
+          });
+        }
+        appendSystem(room, '\u2014 end of history \u2014');
+      }
+      appendSystem(room, `You are in ${msg.room.name}.`);
+      if (msg.room.managed) {
+        appendSystem(
+          room,
+          'This room is bridged to Meshtastic. Anything said here is transmitted over the radio.',
+          'offline-note'
+        );
+      }
+      if (state.roomList) Net.send('list-rooms', {});
+    });
+
+    Net.on('room-left', (msg) => {
+      const room = state.rooms.get(msg.room);
+      state.rooms.delete(msg.room);
+      if (room) room.win.close();
+      if (state.roomList) Net.send('list-rooms', {});
+    });
+
+    Net.on('room-message', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (!room) return;
+      if (msg.id && room.seenIds.has(msg.id)) return;
+
+      appendLine(room, {
+        who: msg.from === state.me.uin ? 'me' : 'them',
+        nick: msg.fromNick || msg.from,
+        body: msg.body,
+        ts: msg.ts,
+        id: msg.id,
+      });
+      room.typingEl.textContent = '';
+
+      if (!room.win.isActive || !document.hasFocus()) {
+        room.win.flash();
+        room.win.setIcon(glyph('room-new'));
+      }
+      Sounds.play('message');
+    });
+
+    Net.on('room-ack', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (room && msg.id) room.seenIds.add(msg.id);
+    });
+
+    Net.on('room-presence', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (room) renderOccupants(room, msg.occupants || []);
+    });
+
+    Net.on('room-entered', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (room) appendSystem(room, `${msg.nick} joined.`);
+    });
+
+    Net.on('room-exited', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (room) appendSystem(room, `${msg.nick} left.`);
+    });
+
+    Net.on('room-topic', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (!room) return;
+      room.topic = msg.topic;
+      updateRoomHead(room);
+      appendSystem(room, msg.topic ? `${msg.by} set the topic: ${msg.topic}` : `${msg.by} cleared the topic.`);
+    });
+
+    Net.on('room-removed', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (room) {
+        appendSystem(room, 'This room was removed.');
+        state.rooms.delete(msg.room);
+      }
+      if (state.roomList) Net.send('list-rooms', {});
+    });
+
+    Net.on('room-typing', (msg) => {
+      const room = state.rooms.get(msg.room);
+      if (!room) return;
+      room.typingEl.textContent = msg.state === 'start' ? `${msg.nick} is typing\u2026` : '';
+    });
+
+    Net.on('history-cleared', (msg) => {
+      const chat = state.chats.get(msg.with);
+      if (chat) {
+        chat.log.innerHTML = '';
+        chat.seenIds = new Set();
+        appendSystem(chat, msg.by ? 'This conversation was cleared by the other person.' : 'Conversation cleared.');
+      }
+      if (!state.serverHistory) saveHistory(msg.with, []);
     });
 
     Net.on('ack', (msg) => {
