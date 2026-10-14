@@ -34,13 +34,21 @@ command -v tar >/dev/null 2>&1 || die "tar is required"
 
 CURRENT=$(node -p "require('$PREFIX/package.json').version" 2>/dev/null || echo "unknown")
 
+# The API answers with everything on one line, so this is parsed properly
+# rather than with grep and cut. Node is already a requirement.
+latest_tag() {
+  curl -fsSL -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$REPO/releases/latest" \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+        try { console.log(String(JSON.parse(s).tag_name || "").replace(/^v/, "")); }
+        catch { process.exit(1); }
+      })'
+}
+
 if [ -n "$WANTED" ]; then
   LATEST=${WANTED#v}
 else
-  LATEST=$(curl -fsSL -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4 | sed 's/^v//') \
-    || die "could not reach the GitHub API"
+  LATEST=$(latest_tag) || die "could not reach the GitHub API"
 fi
 [ -n "$LATEST" ] || die "no releases published for $REPO yet"
 
