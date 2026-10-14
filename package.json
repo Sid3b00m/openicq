@@ -1,0 +1,39 @@
+{
+  "name": "openicq",
+  "version": "0.5.0",
+  "description": "An open source ICQ replica - UINs, contact lists, authorization requests and that sound - for Windows, macOS and Linux.",
+  "license": "MIT",
+  "homepage": "https://github.com/Sid3b00m/openicq#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/Sid3b00m/openicq.git" },
+  "bugs": { "url": "https://github.com/Sid3b00m/openicq/issues" },
+  "type": "commonjs",
+  "main": "server/index.js",
+  "bin": {
+    "openicq": "server/index.js"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node test/smoke.js && node test/security.js && node test/update.js",
+    "test:smoke": "node test/smoke.js",
+    "test:security": "node test/security.js",
+    "test:update": "node test/update.js",
+    "check-update": "node server/index.js --check-update"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "icq",
+    "chat",
+    "instant-messaging",
+    "retro",
+    "websocket",
+    "self-hosted"
+  ],
+  "files": [
+    "server",
+    "public",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,57 @@
+[Unit]
+Description=OpenICQ server
+Documentation=file:/opt/openicq/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openicq
+Group=openicq
+WorkingDirectory=/opt/openicq
+EnvironmentFile=/etc/openicq/openicq.env
+ExecStart=/usr/bin/node /opt/openicq/server/index.js
+Restart=always
+RestartSec=2
+
+# The server never needs to be root, write outside its data directory, or do
+# anything clever with the kernel. Take all of it away.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+UMask=0077
+
+# The database is the only thing it may write.
+ReadWritePaths=/var/lib/openicq
+
+# V8 compiles JIT code at runtime, so W^X cannot be enforced here.
+MemoryDenyWriteExecute=no
+
+# Caps on what a flood can consume before systemd steps in.
+LimitNOFILE=16384
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,71 @@
+# Container route: OpenICQ behind Caddy, which gets a certificate on its own.
+#
+#   cd deploy
+#   edit .env and Caddyfile.docker with your domain
+#   docker compose up -d
+#
+# OpenICQ itself is not published to the host: only Caddy can reach it.
+
+services:
+  openicq:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: openicq:latest
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5190
+      OPENICQ_DATA: /data/openicq.json
+      OPENICQ_ORIGINS: ${OPENICQ_ORIGINS:?set OPENICQ_ORIGINS in deploy/.env}
+      # Caddy is the only thing that can reach this container, so its
+      # X-Forwarded-For can be believed.
+      OPENICQ_TRUST_PROXY: all
+      OPENICQ_HSTS: "on"
+      OPENICQ_MOTD: ${OPENICQ_MOTD:-Welcome back to 1999.}
+    volumes:
+      - openicq-data:/data
+    networks: [front]
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          pids: 256
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5190/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [openicq]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [front]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  openicq-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  front:

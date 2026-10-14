@@ -1,0 +1,24 @@
+# Caddy fetches and renews a certificate on its own, and proxies WebSockets
+# without any extra configuration. Replace the hostname and email, put this at
+# /etc/caddy/Caddyfile, then `systemctl reload caddy`.
+
+{
+	email admin@icq.example.com
+}
+
+icq.example.com {
+	encode gzip
+
+	reverse_proxy 127.0.0.1:5190 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# The server sets its own CSP and friends; this is the one header it
+	# cannot know about, since only the proxy knows TLS is in play.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	log {
+		output file /var/log/caddy/openicq.log
+	}
+}

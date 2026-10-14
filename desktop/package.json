@@ -1,0 +1,34 @@
+{
+  "name": "openicq-desktop",
+  "version": "0.5.0",
+  "description": "Desktop shell for OpenICQ (Windows, macOS, Linux)",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "org.openicq.desktop",
+    "productName": "OpenICQ",
+    "files": ["main.js", "package.json"],
+    "extraResources": [
+      { "from": "../server", "to": "app/server" },
+      { "from": "../public", "to": "app/public" },
+      { "from": "../package.json", "to": "app/package.json" }
+    ],
+    "win": { "target": ["nsis", "portable"] },
+    "mac": { "target": ["dmg", "zip"], "category": "public.app-category.social-networking" },
+    "linux": {
+      "target": ["AppImage", "deb", "rpm", "tar.gz"],
+      "category": "Network;InstantMessaging"
+    }
+  }
+}

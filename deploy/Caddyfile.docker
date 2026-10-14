@@ -1,0 +1,16 @@
+# Caddyfile for the docker compose stack. Replace the hostname and email.
+
+{
+	email admin@icq.example.com
+}
+
+icq.example.com {
+	encode gzip
+
+	reverse_proxy openicq:5190 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Snapshot the OpenICQ database
+After=openicq.service
+
+[Service]
+Type=oneshot
+User=openicq
+Group=openicq
+EnvironmentFile=/etc/openicq/openicq.env
+ExecStart=/opt/openicq/backup.sh
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/openicq
+CapabilityBoundingSet=
+UMask=0077
