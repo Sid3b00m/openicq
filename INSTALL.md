@@ -266,6 +266,75 @@ OPENICQ_TRUST_PROXY=loopback
 
 `systemctl restart openicq` after editing.
 
+### Moving an existing server behind HTTPS
+
+If you already have people on a server they reach as
+`http://icq.example.com:5190` — the port in the address, no certificate — this
+is the move to make. Accounts and messages come across untouched; what changes
+is the address and the fact that passwords stop crossing the network readable.
+
+**First, copy the database somewhere safe.** Everything below is reversible,
+but not if the only copy is gone:
+
+```sh
+sudo systemctl stop openicq        # or Ctrl+C, if you started it by hand
+cp /path/to/your/openicq.json ~/openicq-backup.json
+```
+
+Find where that file actually is before you trust the path. Started by hand
+from a checkout, it defaults to `data/openicq.json` inside the checkout; under
+`--data` or `OPENICQ_DATA`, it is wherever you pointed it. If you are on 0.6.0
+or later there is a `history.jsonl` beside it — bring that too.
+
+**Open 80 and 443 to the world.** On a cloud box this means the security group
+or firewall rules, not just `ufw`. Caddy and certbot both prove you own the
+domain over port 80, so a certificate will never issue while it is shut. This
+is the step people miss.
+
+**Put the database where the service expects it**, then run the installer:
+
+```sh
+sudo mkdir -p /var/lib/openicq
+sudo cp ~/openicq-backup.json /var/lib/openicq/openicq.json
+sudo chown -R openicq:openicq /var/lib/openicq
+
+cd /path/to/openicq
+git pull
+sudo ./deploy/install.sh icq.example.com you@example.com
+```
+
+The installer binds OpenICQ to `127.0.0.1`, so port 5190 stops being reachable
+from outside and the proxy becomes the only way in. It will not overwrite an
+`/etc/openicq/openicq.env` that already exists, so if you had one, set
+`OPENICQ_ORIGINS` to your `https://` URL yourself and confirm
+`OPENICQ_TRUST_PROXY=loopback` — without the second, every visitor looks like
+the proxy and the per-IP limits stop protecting anything.
+
+**Check it worked** before telling anyone the new address:
+
+```sh
+curl -sI https://icq.example.com | head -1       # 200, and no port
+curl -s  https://icq.example.com/health          # {"ok":true}
+sudo ss -ltnp | grep 5190                        # should say 127.0.0.1:5190
+```
+
+Then open the site and sign on. The client upgrades itself to `wss://` because
+the page arrived over HTTPS; there is nothing to configure for that. Once you
+have seen it work, turn on HSTS so browsers stop trying plain HTTP at all:
+
+```sh
+echo 'OPENICQ_HSTS=on' | sudo tee -a /etc/openicq/openicq.env
+sudo systemctl restart openicq
+```
+
+**Tell your users the port is gone.** The address is now
+`https://icq.example.com` with no `:5190`. Anyone who typed a custom server
+into **Main → Server…** has it saved in their browser and should clear or
+update it; a stale `icq.example.com:5190` will try to reach a port that is no
+longer open. Plain `http://icq.example.com` still answers, but only to redirect
+to HTTPS; the old `:5190` address stops answering at all, which is the point —
+leaving it reachable would let people keep signing on in the clear.
+
 ### Day-to-day
 
 | | |
