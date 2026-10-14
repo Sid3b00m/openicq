@@ -289,4 +289,5 @@ MIT. See [LICENSE](LICENSE).
 
 Independent clean-room reimplementation. Not affiliated with ICQ, AOL,
 Mirabilis or VK. No original code, artwork or audio is included — the flowers
-are SVG drawn by hand and the sounds are generated at runtime.
+are SVG drawn by hand and the sounds are generated at runtime. See
+[NOTICE.md](NOTICE.md).
