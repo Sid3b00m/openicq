@@ -172,6 +172,17 @@ body {
   gap: 6px;
 }
 
+/* A window body holds one element from the caller. Any window with a
+   scrolling pane needs that element to be the column the pane sizes against,
+   otherwise the pane keeps its content height and pushes whatever follows it
+   out through the bottom of the frame. */
+.window-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .resize-grip {
   position: absolute;
   right: 0;

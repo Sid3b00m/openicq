@@ -1,6 +1,6 @@
 {
   "name": "openicq",
-  "version": "0.6.0",
+  "version": "0.6.5",
   "description": "An open source ICQ replica - UINs, contact lists, authorization requests and that sound - for Windows, macOS and Linux.",
   "license": "MIT",
   "homepage": "https://github.com/Sid3b00m/openicq#readme",

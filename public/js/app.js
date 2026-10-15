@@ -288,6 +288,7 @@
 
   function openMainWindow() {
     const body = document.createElement('div');
+    body.className = 'window-content';
     body.style.padding = '0';
     body.style.gap = '5px';
     body.innerHTML = `
@@ -657,6 +658,7 @@
 
   function openFindWindow() {
     const body = document.createElement('div');
+    body.className = 'window-content';
     body.innerHTML = `
       <label>Search by UIN, nickname, name or e-mail</label>
       <div style="display:flex;gap:5px">
@@ -713,6 +715,7 @@
     }
 
     const body = document.createElement('div');
+    body.className = 'window-content';
     body.innerHTML = `
       <div class="result-list" data-rooms><div class="list-empty">Loading\u2026</div></div>
       <div class="button-row">
@@ -810,6 +813,7 @@
     }
 
     const body = document.createElement('div');
+    body.className = 'window-content';
     body.style.padding = '0';
     body.innerHTML = `
       <div class="chat-head">
@@ -1043,6 +1047,7 @@
     const nick = peerName(uin, fallbackNick);
 
     const body = document.createElement('div');
+    body.className = 'window-content';
     body.style.padding = '0';
     body.innerHTML = `
       <div class="chat-head">
@@ -1233,6 +1238,7 @@
 
   function openHistory(contact) {
     const body = document.createElement('div');
+    body.className = 'window-content';
     const log = document.createElement('div');
     log.className = 'chat-log';
     log.style.flex = '1';
